@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Kasa">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <title>Kasa</title>
+</head>
+<body>
+  <header class="top">
+    <h1 id="title">Przegląd</h1>
+    <button id="checkin" class="pill" data-action="checkin">+ Miesiąc</button>
+  </header>
+
+  <main>
+    <section id="view-overview" class="view"></section>
+    <section id="view-accounts" class="view" hidden></section>
+    <section id="view-invest" class="view" hidden></section>
+    <section id="view-settings" class="view" hidden></section>
+  </main>
+
+  <nav class="tabs">
+    <button data-view="overview" class="active"><span class="ico">◎</span>Przegląd</button>
+    <button data-view="accounts"><span class="ico">▤</span>Konta</button>
+    <button data-view="invest"><span class="ico">↗</span>Giełda</button>
+    <button data-view="settings"><span class="ico">⚙</span>Ustawienia</button>
+  </nav>
+
+  <dialog id="modal"></dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
