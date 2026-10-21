@@ -1,18 +1,47 @@
 # Kasa — mój majątek
 
-Aplikacja webowa (PWA) na iPhone'a do śledzenia majątku: salda kont co miesiąc + portfel giełdowy.
-Bez serwera i bez kont: dane są tylko w pamięci telefonu (localStorage).
+Aplikacja webowa (PWA) na iPhone'a i komputer do śledzenia majątku: salda kont co miesiąc + portfel giełdowy.
+Bez własnego serwera: dane są w pamięci urządzenia, opcjonalnie synchronizowane w postaci zaszyfrowanej
+(patrz „Synchronizacja”).
 
-## Uruchomienie na iPhonie
+## Instalacja na iPhonie
 
-Safari instaluje PWA tylko z adresu **https**, więc pliki trzeba gdzieś opublikować, np. na GitHub Pages:
+Safari instaluje aplikację tylko ze strony z adresem **https**, więc najpierw trzeba ją opublikować.
+Najprościej za darmo na GitHub Pages.
 
-1. Utwórz repozytorium na GitHubie i wrzuć do niego zawartość tego katalogu.
-2. Settings → Pages → Source: „Deploy from a branch”, gałąź `main`, katalog `/ (root)`.
-3. Na iPhonie otwórz w Safari adres `https://<login>.github.io/<repo>/`.
-4. Udostępnij → **Do ekranu początkowego**.
+### 1. Publikacja na GitHub Pages (raz, na komputerze)
 
-Strona jest publiczna, ale same dane finansowe nigdy nie opuszczają telefonu.
+1. Na https://github.com/new utwórz repozytorium, np. `kasa`. Musi być **publiczne** (darmowe GitHub Pages
+   działa tylko z publicznymi). Publiczny jest tylko kod — Twoje dane nigdy do repozytorium nie trafiają.
+   Nie zaznaczaj „Add a README”.
+2. W terminalu, w tym katalogu (zamiast `<login>` wpisz swój login z GitHuba):
+   ```
+   git init -b main
+   git add .
+   git commit -m "Kasa"
+   git remote add origin https://github.com/<login>/kasa.git
+   git push -u origin main
+   ```
+   Przy `git push` GitHub poprosi o login i zamiast hasła o token
+   (https://github.com/settings/tokens/new — zakres `repo`), chyba że masz już skonfigurowany klucz SSH.
+3. W repozytorium na GitHubie: **Settings → Pages** → Source: „Deploy from a branch” → gałąź `main`,
+   folder `/ (root)` → **Save**.
+4. Po 1–2 minutach na górze tej strony pojawi się adres, np. `https://<login>.github.io/kasa/`.
+   Otwórz go na komputerze i sprawdź, czy aplikacja się ładuje.
+
+### 2. Dodanie do ekranu początkowego (na iPhonie)
+
+1. Otwórz adres `https://<login>.github.io/kasa/` w **Safari** (nie w Chrome ani w aplikacji GitHuba).
+2. Stuknij przycisk **Udostępnij** (kwadrat ze strzałką w górę; w nowszych iOS czasem schowany pod `•••`
+   na pasku adresu).
+3. Przewiń w dół i wybierz **Do ekranu początkowego**.
+4. Jeśli widzisz przełącznik **„Otwórz jako aplikację internetową”**, zostaw go włączonego.
+   Stuknij **Dodaj**.
+5. Uruchamiaj Kasę zawsze **z ikony na ekranie początkowym**, nie z Safari. Ikona i Safari mają osobne
+   dane — to, co wpiszesz w Safari, nie pojawi się w aplikacji z ikony.
+
+Przy pierwszym uruchomieniu potrzebny jest internet, potem aplikacja działa też offline
+(bez internetu nie pobierze tylko notowań, kursów i synchronizacji).
 
 Podgląd na komputerze: `python3 -m http.server 8080` w tym katalogu, potem http://localhost:8080
 (port 8000 zajmuje lokalny kontener DynamoDB).
