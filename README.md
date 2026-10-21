@@ -14,7 +14,28 @@ Safari instaluje PWA tylko z adresu **https**, więc pliki trzeba gdzieś opubli
 
 Strona jest publiczna, ale same dane finansowe nigdy nie opuszczają telefonu.
 
-Podgląd na komputerze: `python3 -m http.server` w tym katalogu, potem http://localhost:8000.
+Podgląd na komputerze: `python3 -m http.server 8080` w tym katalogu, potem http://localhost:8080
+(port 8000 zajmuje lokalny kontener DynamoDB).
+
+## Na komputerze (Ubuntu)
+
+Otwórz ten sam adres `https://<login>.github.io/<repo>/` w **Chrome** i kliknij ikonę instalacji po prawej stronie
+paska adresu (albo menu ⋮ → „Przesyłaj, zapisz i udostępnij” → „Zainstaluj stronę jako aplikację”). Kasa pojawi
+się w menu aplikacji Ubuntu i otworzy się we własnym oknie. Firefox nie potrafi instalować takich aplikacji.
+
+## Synchronizacja telefon ↔ komputer
+
+Dane są szyfrowane na urządzeniu (AES-256, klucz z Twojego hasła) i zapisywane w prywatnym Gist na Twoim
+GitHubie. GitHub przechowuje tylko zaszyfrowane bajty.
+
+1. Utwórz token: https://github.com/settings/tokens/new?scopes=gist&description=Kasa — zaznaczony tylko
+   zakres `gist`, ważność wg uznania (po wygaśnięciu trzeba wkleić nowy).
+2. Na pierwszym urządzeniu: Ustawienia → Synchronizacja → wklej token, wymyśl hasło szyfrowania → Połącz.
+3. Na drugim urządzeniu to samo: **ten sam token i to samo hasło**. Dane z obu urządzeń się połączą.
+
+Synchronizacja dzieje się sama: przy otwarciu aplikacji, po każdej zmianie i przy przejściu aplikacji w tło.
+Zmiany zrobione offline na obu urządzeniach scalają się rekord po rekordzie (wygrywa nowsza zmiana,
+usunięte wpisy nie wracają). Hasła nie da się odzyskać — zapisz je w menedżerze haseł.
 
 ## Notowania
 
@@ -43,9 +64,14 @@ Create Worker → wklej kod → Deploy) i wpisz jego adres w Ustawienia → Noto
 
 ## Aktualizacja
 
-Po zmianie plików podbij `CACHE` w `sw.js` (np. `kasa-v2`), żeby telefon pobrał nową wersję.
+Wystarczy `git push`. GitHub Pages publikuje zmiany po ok. minucie, a iPhone pobiera nową wersję przy
+następnym uruchomieniu aplikacji z internetem. Jeśli aplikacja wisiała w tle, zamknij ją w przełączniku
+aplikacji (przesuń w górę) i otwórz ponownie. Dane na telefonie zostają nietknięte.
+
+`CACHE` w `sw.js` zmieniaj tylko przy dodaniu lub usunięciu plików z listy `FILES`.
 
 ## Kopia zapasowa
 
 Ustawienia → Eksportuj kopię → „Zachowaj w Plikach” (iCloud Drive). Dane z aplikacji na ekranie
-początkowym są osobne od danych w Safari, a po usunięciu ikony znikają.
+początkowym są osobne od danych w Safari, a po usunięciu ikony znikają — chyba że masz włączoną
+synchronizację, wtedy po ponownym dodaniu aplikacji wystarczy połączyć ją znowu.

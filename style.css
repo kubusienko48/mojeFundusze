@@ -36,6 +36,7 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 button { font: inherit; color: inherit; cursor: pointer; }
+a { color: var(--accent); }
 
 .top {
   display: flex; align-items: center; justify-content: space-between;

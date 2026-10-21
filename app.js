@@ -58,15 +58,18 @@ function fromYahoo(sym) {
 // trades:    { id, assetId, brokerId, date, type: 'buy'|'sell', qty, price, fx, fee }
 //            price w walucie waloru, fx = ile zł za 1 jednostkę waluty, fee w zł
 // cash:      { id, brokerId, date, kind: 'in'|'out'|'div', amount, note } — ruchy na rachunku, w zł
-// snapshots: { month, value, deposited }                               — wartość portfela zapisana przy podsumowaniu miesiąca
+// snapshots: { id: 's-RRRR-MM', month, value, deposited }             — wartość portfela zapisana przy podsumowaniu miesiąca
 // fx:        { USD: { rate, date } }                                   — ostatnie kursy średnie NBP
-// settings:  { quotesUrl, lastRefresh }
+// settings:  { quotesUrl, lastRefresh }                                — tylko na tym urządzeniu, bez synchronizacji
+// deleted:   { [id]: czas }                                            — usunięte rekordy, żeby synchronizacja ich nie przywracała
+// Każdy rekord ma też pole u — czas ostatniej zmiany, nadawany w save().
 let db = load();
+let lastSaved = clone(db);
 
 function blank() {
   return {
     version: 3, accounts: [], balances: [], brokers: [], assets: [], trades: [], cash: [], snapshots: [],
-    fx: {}, settings: { quotesUrl: '', lastRefresh: 0 },
+    fx: {}, settings: { quotesUrl: '', lastRefresh: 0 }, deleted: {},
   };
 }
 function migrate(d) {
@@ -76,6 +79,7 @@ function migrate(d) {
   const def = d.brokers[0]?.id;
   for (const t of d.trades) { t.brokerId ??= def; t.fx ??= 1; }
   for (const c of d.cash) c.brokerId ??= def;
+  for (const sn of d.snapshots) sn.id ??= 's-' + sn.month;
   for (const a of d.assets) {
     a.currency ??= 'PLN';
     if (d.version < 3) a.symbol = fromYahoo(a.symbol);
@@ -91,9 +95,31 @@ function load() {
   } catch {}
   return blank();
 }
-function save() {
+function clone(x) {
+  return JSON.parse(JSON.stringify(x));
+}
+function persist() {
   localStorage.setItem(KEY, JSON.stringify(db));
+  lastSaved = clone(db);
+}
+function save() {
+  stamp();
+  persist();
   render();
+  scheduleSync();
+}
+
+// Oznacza zmienione rekordy czasem zmiany, a usunięte zapisuje w db.deleted.
+function stamp() {
+  const now = Date.now();
+  for (const k of SYNCED) {
+    const prev = new Map(lastSaved[k].map(r => [r.id, JSON.stringify(r)]));
+    for (const r of db[k]) {
+      if (prev.get(r.id) !== JSON.stringify(r)) r.u = now;
+      prev.delete(r.id);
+    }
+    for (const id of prev.keys()) db.deleted[id] = now;
+  }
 }
 
 // ---------- obliczenia ----------
@@ -311,6 +337,184 @@ function autoRefresh() {
   if (held && navigator.onLine !== false && Date.now() - db.settings.lastRefresh > 15 * 60 * 1000) refreshPrices();
 }
 
+// ---------- synchronizacja ----------
+// Zaszyfrowana kopia danych w prywatnym Gist na GitHubie użytkownika. Szyfrujemy na urządzeniu
+// (AES-GCM, klucz z hasła przez PBKDF2), więc GitHub widzi tylko szyfrogram. Urządzenia scalają dane
+// rekord po rekordzie: wygrywa nowsza zmiana (pole u), a usunięcia z db.deleted nie wracają.
+const SYNC_KEY = 'kasa-sync';
+const SYNCED = ['accounts', 'balances', 'brokers', 'assets', 'trades', 'cash', 'snapshots'];
+const GIST_FILE = 'kasa.enc.json';
+const PBKDF2_ITER = 250000;
+let syncCfg = loadSyncCfg(); // { token, pass, gistId, salt, last }
+let syncing = false, syncAgain = false, syncTimer = null, syncError = '';
+
+function loadSyncCfg() {
+  try { return JSON.parse(localStorage.getItem(SYNC_KEY)); } catch { return null; }
+}
+function saveSyncCfg() {
+  if (syncCfg) localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg));
+  else localStorage.removeItem(SYNC_KEY);
+}
+
+// Część danych, która jest synchronizowana (bez ustawień tego urządzenia).
+function payload(d) {
+  const out = { version: d.version, deleted: d.deleted, fx: d.fx };
+  for (const k of SYNCED) out[k] = d[k];
+  return out;
+}
+
+function mergeData(local, remote) {
+  const deleted = { ...remote.deleted };
+  for (const [id, t] of Object.entries(local.deleted || {})) deleted[id] = Math.max(t, deleted[id] || 0);
+  const out = { ...local, deleted, fx: { ...remote.fx } };
+  for (const [c, v] of Object.entries(local.fx || {})) if (!out.fx[c] || v.date > out.fx[c].date) out.fx[c] = v;
+  for (const k of SYNCED) {
+    const m = new Map();
+    for (const r of [...(remote[k] || []), ...(local[k] || [])]) {
+      const ex = m.get(r.id);
+      if (!ex || (r.u || 0) > (ex.u || 0)) m.set(r.id, r);
+    }
+    out[k] = [...m.values()].filter(r => !(r.id in deleted && deleted[r.id] >= (r.u || 0)));
+  }
+  // Dwa urządzenia mogły zapisać saldo tego samego konta za ten sam miesiąc — zostaje nowsze.
+  const bal = new Map();
+  for (const b of out.balances) {
+    const key = b.accountId + '|' + b.month;
+    if (!bal.has(key) || (b.u || 0) > (bal.get(key).u || 0)) bal.set(key, b);
+  }
+  out.balances = [...bal.values()];
+  return out;
+}
+
+function b64(buf) {
+  const u = new Uint8Array(buf);
+  let s = '';
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+let keyCache = null;
+async function cryptoKey(salt) {
+  if (keyCache?.salt === salt && keyCache.pass === syncCfg.pass) return keyCache.key;
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(syncCfg.pass), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: unb64(salt), iterations: PBKDF2_ITER, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  keyCache = { salt, pass: syncCfg.pass, key };
+  return key;
+}
+async function encrypt(data) {
+  syncCfg.salt ??= b64(crypto.getRandomValues(new Uint8Array(16)));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await cryptoKey(syncCfg.salt), new TextEncoder().encode(JSON.stringify(data)));
+  return { v: 1, kdf: 'PBKDF2-SHA256', iter: PBKDF2_ITER, salt: syncCfg.salt, iv: b64(iv), data: b64(ct) };
+}
+async function decrypt(file) {
+  try {
+    const key = await cryptoKey(file.salt);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(file.iv) }, key, unb64(file.data));
+    return JSON.parse(new TextDecoder().decode(pt));
+  } catch {
+    throw new Error('złe hasło szyfrowania — musi być takie samo na wszystkich urządzeniach');
+  }
+}
+
+async function gh(path, opts = {}) {
+  const r = await fetch('https://api.github.com' + path, {
+    ...opts,
+    cache: 'no-store',
+    headers: { Authorization: 'Bearer ' + syncCfg.token, Accept: 'application/vnd.github+json', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+  });
+  if (r.ok) return r.json();
+  const err = new Error(
+    r.status === 401 ? 'token GitHuba jest nieprawidłowy albo wygasł'
+      : r.status === 403 ? 'token nie ma uprawnienia do Gistów'
+        : 'GitHub odpowiedział ' + r.status);
+  err.status = r.status;
+  throw err;
+}
+
+async function readGist() {
+  const g = await gh('/gists/' + syncCfg.gistId);
+  const f = g.files[GIST_FILE];
+  if (!f) return null;
+  const text = f.truncated ? await (await fetch(f.raw_url, { cache: 'no-store' })).text() : f.content;
+  const file = JSON.parse(text);
+  const data = await decrypt(file);
+  syncCfg.salt = file.salt;
+  return data;
+}
+async function writeGist(data) {
+  const files = { [GIST_FILE]: { content: JSON.stringify(await encrypt(data)) } };
+  if (syncCfg.gistId) await gh('/gists/' + syncCfg.gistId, { method: 'PATCH', body: JSON.stringify({ files }) });
+  else syncCfg.gistId = (await gh('/gists', { method: 'POST', body: JSON.stringify({ description: 'Kasa — zaszyfrowane dane', public: false, files }) })).id;
+}
+
+// Pobiera dane z Gista, scala z lokalnymi i wysyła wynik, jeśli coś się zmieniło. Zwraca błąd albo null.
+async function runSync() {
+  if (!syncCfg) return null;
+  if (syncing) { syncAgain = true; return null; }
+  syncing = true;
+  clearTimeout(syncTimer);
+  syncTimer = null;
+  let error = null;
+  try {
+    let remote = null;
+    if (syncCfg.gistId) {
+      try { remote = await readGist(); } catch (e) { if (e.status === 404) syncCfg.gistId = null; else throw e; }
+    }
+    let remoteJson = null;
+    if (remote) {
+      remote = migrate(remote);
+      remoteJson = JSON.stringify(payload(remote));
+      const merged = mergeData(db, remote);
+      if (JSON.stringify(payload(merged)) !== JSON.stringify(payload(db))) {
+        db = merged;
+        persist();
+      }
+    }
+    const json = JSON.stringify(payload(db));
+    if (json !== remoteJson) await writeGist(payload(db));
+    syncCfg.last = Date.now();
+    syncError = '';
+    saveSyncCfg();
+  } catch (e) {
+    error = e;
+    syncError = e.message;
+  } finally {
+    syncing = false;
+    render();
+    if (syncAgain) { syncAgain = false; runSync(); }
+  }
+  return error;
+}
+function scheduleSync() {
+  if (!syncCfg) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, 2000);
+}
+
+async function connectSync(token, pass) {
+  syncCfg = { token, pass, gistId: null, salt: null, last: 0 };
+  let error;
+  try {
+    const found = (await gh('/gists?per_page=100')).find(g => g.files[GIST_FILE]);
+    if (found) syncCfg.gistId = found.id;
+    error = await runSync();
+  } catch (e) {
+    error = e;
+  }
+  if (error) {
+    syncCfg = null;
+    keyCache = null;
+    syncError = 'Nie udało się połączyć: ' + error.message;
+  }
+  saveSyncCfg();
+  render();
+  return error;
+}
+
 // ---------- widoki ----------
 const TITLES = { overview: 'Przegląd', accounts: 'Konta', invest: 'Giełda', settings: 'Ustawienia' };
 let current = 'overview';
@@ -524,8 +728,31 @@ function renderSettings() {
     </div>
 
     <div class="card">
+      <h2>Synchronizacja (telefon ↔ komputer)</h2>
+      ${syncCfg ? `
+        <p class="hint ${syncError ? 'neg' : ''}" style="margin-bottom:12px">${syncing ? 'Synchronizuję…'
+          : syncError ? 'Błąd: ' + esc(syncError)
+            : syncCfg.last ? 'Zsynchronizowano ' + timeFmt.format(syncCfg.last) : 'Jeszcze nie zsynchronizowano'}</p>
+        <div class="actions">
+          <button class="btn primary" data-action="sync" ${syncing ? 'disabled' : ''}>Synchronizuj teraz</button>
+          <button class="btn danger" data-action="sync-off">Odłącz</button>
+        </div>`
+      : `
+        <p class="hint" style="margin-bottom:10px">Dane są szyfrowane Twoim hasłem na tym urządzeniu i trafiają do prywatnego Gista na Twoim GitHubie — GitHub widzi tylko zaszyfrowane bajty. Na każdym urządzeniu wpisz ten sam token i <b>to samo hasło</b>.</p>
+        <p class="hint" style="margin-bottom:10px">Token utworzysz <a href="https://github.com/settings/tokens/new?scopes=gist&description=Kasa" target="_blank" rel="noopener">tutaj</a> (zaznaczone tylko „gist”, ważność dowolna).</p>
+        <form id="sync-form" style="display:flex;flex-direction:column;gap:10px">
+          ${field('Token GitHuba', '<input name="token" type="password" autocomplete="off" placeholder="ghp_…">')}
+          ${field('Hasło szyfrowania', '<input name="pass" type="password" autocomplete="new-password" placeholder="min. 8 znaków">')}
+          <div class="actions"><button class="btn primary" type="submit">Połącz</button></div>
+          <p class="hint neg" id="sync-msg">${esc(syncError)}</p>
+        </form>
+        <p class="hint">Nie zapomnij hasła — bez niego zaszyfrowanej kopii nie da się odczytać.</p>`}
+    </div>
+
+    <div class="card">
       <h2>Kopia zapasowa</h2>
-      <p class="hint" style="margin-bottom:12px">Dane są zapisane tylko na tym telefonie. Rób regularnie kopię (np. do iCloud Drive w aplikacji Pliki) — po usunięciu aplikacji z ekranu początkowego dane znikną.</p>
+      <p class="hint" style="margin-bottom:12px">${syncCfg ? 'Kopia w pliku przydaje się na wszelki wypadek, np. raz na kilka miesięcy.'
+        : 'Dane są zapisane tylko na tym urządzeniu. Rób regularnie kopię (np. do iCloud Drive w aplikacji Pliki) albo włącz synchronizację — po usunięciu aplikacji z ekranu początkowego dane znikną.'}</p>
       <div class="actions">
         <button class="btn primary" data-action="export">Eksportuj kopię</button>
         <button class="btn" data-action="import">Wczytaj kopię</button>
@@ -536,7 +763,22 @@ function renderSettings() {
       <h2>Strefa niebezpieczna</h2>
       <div class="actions"><button class="btn danger" data-action="wipe">Usuń wszystkie dane</button></div>
     </div>
-    <p class="hint" style="text-align:center">Kasa · dane tylko na tym telefonie</p>`;
+    <p class="hint" style="text-align:center">Kasa · ${syncCfg ? 'dane szyfrowane i synchronizowane' : 'dane tylko na tym urządzeniu'}</p>`;
+
+  const syncForm = $('#sync-form');
+  if (syncForm) syncForm.onsubmit = async e => {
+    e.preventDefault();
+    const token = syncForm.elements.token.value.trim();
+    const pass = syncForm.elements.pass.value;
+    const msg = $('#sync-msg');
+    if (!need(syncForm, 'token', token, 'Wklej token z GitHuba')) return;
+    if (!need(syncForm, 'pass', pass.length >= 8, 'Hasło musi mieć co najmniej 8 znaków')) return;
+    msg.textContent = 'Łączę z GitHubem…';
+    msg.className = 'hint';
+    syncForm.querySelector('button').disabled = true;
+    syncError = '';
+    await connectSync(token, pass);
+  };
 
   $('#quotes-form').onsubmit = async e => {
     e.preventDefault();
@@ -663,7 +905,7 @@ function accountForm(acc) {
 function setBalance(accountId, month, amount) {
   const ex = db.balances.find(b => b.accountId === accountId && b.month === month);
   if (ex) ex.amount = amount;
-  else db.balances.push({ id: uid(), accountId, month, amount });
+  else db.balances.push({ id: `${accountId}:${month}`, accountId, month, amount });
 }
 
 function tradeForm(trade, preset = {}) {
@@ -987,7 +1229,7 @@ function checkinForm(month = thisMonth()) {
       if (db.assets.length) {
         const pf = portfolio(now ? today() : monthEnd(m), prices, fxs);
         db.snapshots = db.snapshots.filter(s => s.month !== m);
-        db.snapshots.push({ month: m, value: pf.value, deposited: pf.base });
+        db.snapshots.push({ id: 's-' + m, month: m, value: pf.value, deposited: pf.base });
       }
       save();
     },
@@ -1046,9 +1288,19 @@ const ACTIONS = {
   export: exportData,
   import: importData,
   wipe: () => {
-    if (!confirm('Na pewno usunąć WSZYSTKIE dane? Tego nie da się cofnąć.')) return;
-    db = blank();
+    const where = syncCfg ? ' Znikną też na wszystkich połączonych urządzeniach.' : '';
+    if (!confirm('Na pewno usunąć WSZYSTKIE dane? Tego nie da się cofnąć.' + where)) return;
+    db = { ...blank(), deleted: db.deleted, settings: db.settings };
     save();
+  },
+  sync: () => runSync(),
+  'sync-off': () => {
+    if (!confirm('Odłączyć synchronizację na tym urządzeniu? Dane tutaj zostaną, przestaną się tylko aktualizować.')) return;
+    syncCfg = null;
+    keyCache = null;
+    syncError = '';
+    saveSyncCfg();
+    render();
   },
 };
 
@@ -1060,9 +1312,13 @@ document.addEventListener('click', e => {
 });
 // Kliknięcie w tło zamyka okno.
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') autoRefresh(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { runSync(); autoRefresh(); }
+  else if (syncTimer) runSync(); // aplikacja idzie w tło — wyślij zaległe zmiany od razu
+});
 
 navigator.storage?.persist?.();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js');
 render();
+runSync();
 autoRefresh();
